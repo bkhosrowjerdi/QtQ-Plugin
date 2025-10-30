@@ -1,0 +1,379 @@
+# ============================================================================
+# QTQ PLUGIN - MAIN ALGORITHM
+# Qualitative-to-Quantitative Spatial Optimization using Genetic Algorithm
+# Author: Behrooz Khosrowjerdi
+# ============================================================================
+
+# ------------------------ INITIALIZATION MODULE ------------------------
+
+FUNCTION Initialize_QTQ_System(plan_geometry, design_variables):
+    """
+    Initialize the QTQ optimization system with input geometry and variables
+    
+    Input:
+        plan_geometry: 2D/3D geometry from Rhino/Grasshopper
+        design_variables: Dictionary of qualitative factors to optimize
+    Output:
+        analysis_grid: Point grid for spatial analysis
+        variable_weights: Normalized weights for each qualitative factor
+    """
+    
+    # Generate analysis grid
+    analysis_grid = CREATE_POINT_GRID(plan_geometry, resolution=1.0m)
+    
+    # Define qualitative variables and their weights
+    design_variables = {
+        'social_interaction': 0.35,
+        'privacy': 0.20,
+        'accessibility': 0.25,
+        'visual_connectivity': 0.20
+    }
+    
+    # Normalize weights to sum = 1.0
+    variable_weights = NORMALIZE_WEIGHTS(design_variables)
+    
+    RETURN analysis_grid, variable_weights
+
+# ------------------------ READABILITY COEFFICIENT MODULE ------------------------
+
+FUNCTION Calculate_Readability_Coefficient(point, space_configuration):
+    """
+    Calculate readability coefficient for each point based on flowchart
+    Reference: Qtq.pdf page 12 - Readability coefficient matrix workflow
+    """
+    
+    # Step 1: Initialize coefficient matrix
+    coefficient_matrix = INITIALIZE_MATRIX(size=len(analysis_grid))
+    
+    # Step 2: For each point in the grid
+    FOR each point IN analysis_grid:
+        
+        # Calculate visibility graph
+        visibility_graph = COMPUTE_ISOVIST(point, space_configuration)
+        
+        # Calculate integration value (Space Syntax)
+        integration_value = CALCULATE_INTEGRATION(point, depth=3)
+        
+        # Calculate choice value
+        choice_value = CALCULATE_CHOICE(point, radius='n')
+        
+        # Combine metrics into readability coefficient
+        readability_coefficient = (
+            0.4 * visibility_graph.area_normalized +
+            0.3 * integration_value +
+            0.3 * choice_value
+        )
+        
+        # Store in matrix
+        coefficient_matrix[point.index] = readability_coefficient
+    
+    # Step 3: Receive points with coefficients
+    points_with_coefficients = ZIP(analysis_grid, coefficient_matrix)
+    
+    RETURN points_with_coefficients
+
+# ------------------------ POINT CLASSIFICATION MODULE ------------------------
+
+FUNCTION Classify_Points_By_Elements(points_with_coefficients, space_elements):
+    """
+    Classify points relative to spatial elements
+    Based on flowchart: "Classify points relative to point elements"
+    """
+    
+    classified_points = {}
+    
+    FOR each element IN space_elements:  # e.g., 'seating', 'circulation', 'gathering'
+        classified_points[element] = []
+        
+        FOR each point IN points_with_coefficients:
+            # Calculate distance to element
+            distance = CALCULATE_DISTANCE(point.location, element.centroid)
+            
+            # Check if point is within element's influence zone
+            IF distance <= element.influence_radius:
+                point_data = {
+                    'location': point.location,
+                    'coefficient': point.coefficient,
+                    'distance_to_element': distance,
+                    'element_type': element.type
+                }
+                classified_points[element].append(point_data)
+    
+    RETURN classified_points
+
+# ------------------------ FITNESS FUNCTION MODULE ------------------------
+
+FUNCTION Calculate_Fitness(space_configuration, target_metrics):
+    """
+    Fitness function for genetic algorithm evaluation
+    Combines multiple qualitative factors into single fitness score
+    """
+    
+    fitness_components = []
+    
+    # Component 1: Social Interaction Potential
+    social_score = 0
+    FOR each gathering_space IN space_configuration.gathering_spaces:
+        # Sum readability coefficients in gathering areas
+        area_coefficients = GET_COEFFICIENTS_IN_AREA(gathering_space)
+        social_score += SUM(area_coefficients) * gathering_space.importance
+    
+    fitness_components.append(social_score * variable_weights['social_interaction'])
+    
+    # Component 2: Privacy Gradient
+    privacy_score = 0
+    FOR each private_space IN space_configuration.private_spaces:
+        # Calculate isolation index (inverse of integration)
+        isolation = 1.0 - CALCULATE_INTEGRATION(private_space.centroid)
+        privacy_score += isolation * private_space.importance
+    
+    fitness_components.append(privacy_score * variable_weights['privacy'])
+    
+    # Component 3: Accessibility
+    accessibility_score = 0
+    FOR each circulation_path IN space_configuration.paths:
+        # Calculate mean choice value along path
+        path_choice = CALCULATE_PATH_CHOICE(circulation_path)
+        accessibility_score += path_choice * circulation_path.importance
+    
+    fitness_components.append(accessibility_score * variable_weights['accessibility'])
+    
+    # Component 4: Visual Connectivity
+    visual_score = 0
+    key_points = GET_KEY_VIEWPOINTS(space_configuration)
+    FOR each viewpoint IN key_points:
+        # Calculate visual field area
+        isovist = COMPUTE_ISOVIST(viewpoint, space_configuration)
+        visual_score += isovist.area / isovist.perimeter  # Compactness
+    
+    fitness_components.append(visual_score * variable_weights['visual_connectivity'])
+    
+    # Combine all components
+    total_fitness = SUM(fitness_components)
+    
+    RETURN total_fitness
+
+# ------------------------ GENETIC ALGORITHM MODULE ------------------------
+
+FUNCTION Genetic_Algorithm_Optimization(initial_configuration, parameters):
+    """
+    Main GA loop for optimizing spatial configuration
+    Based on: "Using Genetic Algorithm" component in workflow
+    """
+    
+    # GA Parameters
+    POPULATION_SIZE = parameters.population_size OR 50
+    MAX_GENERATIONS = parameters.max_generations OR 100
+    MUTATION_RATE = parameters.mutation_rate OR 0.1
+    CROSSOVER_RATE = parameters.crossover_rate OR 0.7
+    ELITE_SIZE = parameters.elite_size OR 5
+    
+    # Initialize population
+    population = []
+    FOR i IN RANGE(POPULATION_SIZE):
+        individual = MUTATE_CONFIGURATION(initial_configuration, rate=0.3)
+        population.append(individual)
+    
+    # Evolution loop
+    FOR generation IN RANGE(MAX_GENERATIONS):
+        
+        # Step 1: Evaluate fitness for all individuals
+        fitness_scores = []
+        FOR each individual IN population:
+            # Calculate readability coefficients
+            coefficients = Calculate_Readability_Coefficient(
+                individual.points, 
+                individual.configuration
+            )
+            
+            # Calculate fitness
+            fitness = Calculate_Fitness(individual, target_metrics)
+            fitness_scores.append(fitness)
+        
+        # Step 2: Selection (Tournament selection)
+        parents = []
+        FOR i IN RANGE(POPULATION_SIZE - ELITE_SIZE):
+            tournament_size = 3
+            tournament = RANDOM_SAMPLE(population, tournament_size)
+            winner = MAX(tournament, key=lambda x: x.fitness)
+            parents.append(winner)
+        
+        # Step 3: Crossover
+        offspring = []
+        FOR i IN RANGE(0, LEN(parents), 2):
+            IF RANDOM() < CROSSOVER_RATE:
+                child1, child2 = CROSSOVER(parents[i], parents[i+1])
+                offspring.extend([child1, child2])
+            ELSE:
+                offspring.extend([parents[i], parents[i+1]])
+        
+        # Step 4: Mutation
+        FOR individual IN offspring:
+            IF RANDOM() < MUTATION_RATE:
+                individual = MUTATE_CONFIGURATION(individual)
+        
+        # Step 5: Elitism - keep best individuals
+        elite = GET_TOP_N(population, ELITE_SIZE, key=fitness)
+        
+        # Step 6: Form new population
+        population = elite + offspring[:POPULATION_SIZE - ELITE_SIZE]
+        
+        # Step 7: Check convergence
+        IF CHECK_CONVERGENCE(fitness_scores, threshold=0.001):
+            BREAK
+    
+    # Return best solution
+    best_solution = MAX(population, key=lambda x: x.fitness)
+    RETURN best_solution
+
+# ------------------------ MUTATION OPERATORS ------------------------
+
+FUNCTION MUTATE_CONFIGURATION(configuration, rate=0.1):
+    """
+    Mutation operators for spatial configuration
+    """
+    
+    mutated = COPY(configuration)
+    
+    # Mutation Type 1: Shift furniture/element positions
+    IF RANDOM() < rate:
+        element = RANDOM_CHOICE(mutated.furniture_elements)
+        max_shift = 2.0  # meters
+        element.position.x += RANDOM_UNIFORM(-max_shift, max_shift)
+        element.position.y += RANDOM_UNIFORM(-max_shift, max_shift)
+        
+        # Ensure within boundaries
+        element.position = CONSTRAIN_TO_BOUNDARY(element.position, mutated.boundary)
+    
+    # Mutation Type 2: Rotate elements
+    IF RANDOM() < rate:
+        element = RANDOM_CHOICE(mutated.furniture_elements)
+        element.rotation += RANDOM_UNIFORM(-45, 45)  # degrees
+    
+    # Mutation Type 3: Swap spaces
+    IF RANDOM() < rate * 0.5:  # Lower probability
+        space1, space2 = RANDOM_SAMPLE(mutated.spaces, 2)
+        SWAP_SPACES(space1, space2)
+    
+    # Mutation Type 4: Resize openings
+    IF RANDOM() < rate:
+        opening = RANDOM_CHOICE(mutated.openings)
+        opening.width *= RANDOM_UNIFORM(0.8, 1.2)
+        opening.width = CONSTRAIN(opening.width, min=0.8, max=3.0)
+    
+    RETURN mutated
+
+# ------------------------ CROSSOVER OPERATORS ------------------------
+
+FUNCTION CROSSOVER(parent1, parent2):
+    """
+    Crossover operator for combining two spatial configurations
+    """
+    
+    child1 = COPY(parent1)
+    child2 = COPY(parent2)
+    
+    # Crossover Type: Zone-based exchange
+    zones = ['public', 'private', 'service', 'circulation']
+    crossover_point = RANDOM_INT(1, LEN(zones) - 1)
+    
+    FOR i IN RANGE(crossover_point, LEN(zones)):
+        zone_name = zones[i]
+        # Swap zone configurations
+        child1.zones[zone_name] = parent2.zones[zone_name]
+        child2.zones[zone_name] = parent1.zones[zone_name]
+    
+    # Repair configurations to ensure validity
+    child1 = REPAIR_CONFIGURATION(child1)
+    child2 = REPAIR_CONFIGURATION(child2)
+    
+    RETURN child1, child2
+
+# ------------------------ OUTPUT MODULE ------------------------
+
+FUNCTION Generate_Output_Results(optimized_configuration):
+    """
+    Generate numerical and visual outputs
+    Reference: "Computing Output Results in Numerical and Visual Models"
+    """
+    
+    outputs = {}
+    
+    # Numerical outputs
+    outputs['numerical'] = {
+        'fitness_score': optimized_configuration.fitness,
+        'social_interaction_index': CALCULATE_SOCIAL_INDEX(optimized_configuration),
+        'privacy_score': CALCULATE_PRIVACY_SCORE(optimized_configuration),
+        'accessibility_metric': CALCULATE_ACCESSIBILITY(optimized_configuration),
+        'visual_connectivity': CALCULATE_VISUAL_CONNECTIVITY(optimized_configuration),
+        'coefficient_matrix': optimized_configuration.coefficient_matrix
+    }
+    
+    # Visual outputs
+    outputs['visual'] = {
+        'heatmap': GENERATE_COEFFICIENT_HEATMAP(optimized_configuration),
+        'isovist_fields': GENERATE_ISOVIST_MAP(optimized_configuration),
+        'circulation_diagram': GENERATE_CIRCULATION_PATHS(optimized_configuration),
+        'social_zones': HIGHLIGHT_SOCIAL_ZONES(optimized_configuration),
+        'optimized_layout': RENDER_CONFIGURATION(optimized_configuration)
+    }
+    
+    # Statistical summary
+    outputs['statistics'] = {
+        'mean_coefficient': MEAN(optimized_configuration.coefficient_matrix),
+        'std_coefficient': STD(optimized_configuration.coefficient_matrix),
+        'improvement_percentage': CALCULATE_IMPROVEMENT(
+            initial_configuration, 
+            optimized_configuration
+        )
+    }
+    
+    # Export to Grasshopper
+    EXPORT_TO_GRASSHOPPER(outputs)
+    
+    # Show list of points weight (from flowchart)
+    DISPLAY_POINT_WEIGHTS(optimized_configuration.points_with_weights)
+    
+    RETURN outputs
+
+# ------------------------ MAIN EXECUTION ------------------------
+
+FUNCTION MAIN():
+    """
+    Main execution function for QTQ Plugin
+    """
+    
+    # Step 1: Receive input plan and variables
+    plan_geometry = GET_RHINO_GEOMETRY()
+    design_variables = GET_USER_VARIABLES()
+    
+    # Step 2: Initialize system
+    analysis_grid, weights = Initialize_QTQ_System(plan_geometry, design_variables)
+    
+    # Step 3: Set GA parameters
+    ga_parameters = {
+        'population_size': 50,
+        'max_generations': 100,
+        'mutation_rate': 0.1,
+        'crossover_rate': 0.7,
+        'elite_size': 5
+    }
+    
+    # Step 4: Run optimization
+    initial_configuration = CREATE_INITIAL_CONFIGURATION(plan_geometry, analysis_grid)
+    optimized_solution = Genetic_Algorithm_Optimization(
+        initial_configuration, 
+        ga_parameters
+    )
+    
+    # Step 5: Generate outputs
+    results = Generate_Output_Results(optimized_solution)
+    
+    # Step 6: Display results
+    DISPLAY_RESULTS(results)
+    
+    RETURN results
+
+# Execute main function
+IF __name__ == "__main__":
+    results = MAIN()
